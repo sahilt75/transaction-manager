@@ -23,7 +23,7 @@ def test_apply_withdrawal_rules(spark_session):
     balances_schema = StructType([
         StructField("account_id", StringType(), True),
         StructField("balance_order", IntegerType(), True),
-        StructField("balance_amount", FloatType(), True)
+        StructField("available_balance", FloatType(), True)
     ])
 
     # Define schema for withdrawals DataFrame
@@ -50,7 +50,7 @@ def test_apply_withdrawal_rules(spark_session):
     # Assertions
     print(results)
     assert len(results) == 4
-    assert results[0] == ("15", 1, 10000.0, 0.0, BalanceStatus.BALANCE_WITHDREW.name, WithdrawValidationResult.SUCCESS.name)
-    assert results[1] == ("15", 2, 2000.0, 0.0, BalanceStatus.BALANCE_WITHDREW.name, WithdrawValidationResult.SUCCESS.name)
+    assert results[0] == ("15", 1, 10000.0, 0.0, BalanceStatus.BALANCE_WITHDREW.name, WithdrawValidationResult.PARTIAL_SUCCESS.name)
+    assert results[1] == ("15", 2, 2000.0, 0.0, BalanceStatus.BALANCE_WITHDREW.name, WithdrawValidationResult.PARTIAL_SUCCESS.name)
     assert results[2] == ("15", 3, 4000.0, 3000.0, BalanceStatus.ACTIVE.name, WithdrawValidationResult.SUCCESS.name)
     assert results[3] == ("16", 1, 5000.0, 5000.0, BalanceStatus.ACTIVE.name, WithdrawValidationResult.FAILURE.name)

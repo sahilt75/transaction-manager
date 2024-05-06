@@ -1,4 +1,4 @@
-account_id,balance_order,balance_amount
+account_id,balance_order,available_balance
 12,1,12000
 12,2,2000
 15,1,10000

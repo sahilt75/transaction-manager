@@ -11,6 +11,7 @@ class BalanceStatus(Enum):
 
 class WithdrawValidationResult(Enum):
     SUCCESS = "WITHDRAW_SUCCESS"
+    PARTIAL_SUCCESS = "WITHDRAW_SUCCESS_PARTIAL"
     FAILURE = "WITHDRAW_FAILED"
 
 
@@ -29,14 +30,14 @@ class TransactionManager:
         """
         # Calculate total balance for each account
         total_balance_df = self.balances_df.groupBy("account_id") \
-                                    .agg(spark_sum("balance_amount").alias("total_balance"))
+                                    .agg(spark_sum("available_balance").alias("total_balance"))
 
         # Calculate total withdrawal amount for each account
         total_withdrawal_df = self.withdrawals_df.groupBy("account_id").agg(spark_sum("withdraw_amount").alias("total_withdrawal"))
 
         # Join total balance and total withdrawal
         result_df = self.balances_df.join(total_withdrawal_df, "account_id", "inner") \
-                                    .withColumn("initial_balance", col("balance_amount")) \
+                                    .withColumn("initial_balance", col("available_balance")) \
                                     .withColumn("total_withdrawal", col("total_withdrawal")) 
 
         result_df = result_df.join(total_balance_df, "account_id", "inner") \
@@ -66,23 +67,23 @@ class TransactionManager:
         for row in sorted_balance_df.collect():
             if remaining_withdrawal == 0 and account_id != row["account_id"]:
                 remaining_withdrawal = row["total_withdrawal"]
-
+            
             if float(row["total_balance"]) < float(row["total_withdrawal"]):
-                available_balance = float(row["balance_amount"])
+                available_balance = float(row["available_balance"])
                 status = BalanceStatus.ACTIVE.name
                 validation_result = WithdrawValidationResult.FAILURE.name
                 remaining_withdrawal = 0
             else:
-                if float(row["balance_amount"]) >= remaining_withdrawal:
-                    available_balance = float(row["balance_amount"]) - remaining_withdrawal
-                    status = BalanceStatus.BALANCE_WITHDREW.name if float(row["balance_amount"]) == remaining_withdrawal else BalanceStatus.ACTIVE.name
+                if float(row["available_balance"]) >= remaining_withdrawal:
+                    available_balance = float(row["available_balance"]) - remaining_withdrawal
+                    status = BalanceStatus.BALANCE_WITHDREW.name if float(row["available_balance"]) == remaining_withdrawal else BalanceStatus.ACTIVE.name
                     remaining_withdrawal = 0
                     validation_result = WithdrawValidationResult.SUCCESS.name
                 else:
                     available_balance = 0
-                    remaining_withdrawal = remaining_withdrawal - float(row["balance_amount"])
+                    remaining_withdrawal = remaining_withdrawal - float(row["available_balance"])
                     status = BalanceStatus.BALANCE_WITHDREW.name
-                    validation_result = WithdrawValidationResult.SUCCESS.name
+                    validation_result = WithdrawValidationResult.PARTIAL_SUCCESS.name
             
             results.append((
                 row["account_id"],
@@ -109,5 +110,6 @@ class TransactionManager:
 
         # Write result DataFrame to CSV
         result_df = self.spark.createDataFrame(withdraw_results, ["account_id", "balance_order", "initial_balance", "available_balance", "status", "validation_result"])
-        result_df.write.csv("data/result.csv", mode="overwrite", header=True)
+        result_df.repartition(1).write.csv("data/result.csv", mode="overwrite", header=True)
+        
 

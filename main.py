@@ -16,7 +16,7 @@ def main():
     # process withdrawals
     transaction_manager = TransactionManager(spark=spark, balances_df=balances_df, withdrawals_df=withdrawals_df)
     transaction_manager.process_withdrawals()
-    logger.info("withdrawals processed!")
+    logger.info("withdrawals processed! Please check result.csv")
 
 
 if __name__ == "__main__":
