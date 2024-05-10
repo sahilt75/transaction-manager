@@ -110,5 +110,6 @@ class TransactionManager:
         logger.info("Rules applied..")
 
         # Write result DataFrame to CSV
+        self.balances_df = self.balances_df.drop("total_balance")
         self.balances_df.repartition(1).write.csv("data/result.csv", mode="overwrite", header=True)
 
