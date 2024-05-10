@@ -1,6 +1,9 @@
 from pyspark.sql.functions import col, sum as spark_sum
 from pyspark.sql import DataFrame
 from enum import Enum
+from pyspark.sql.functions import lit, expr, when, asc
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
 from utils.logger import logger
 
@@ -13,6 +16,7 @@ class WithdrawValidationResult(Enum):
     SUCCESS = "WITHDRAW_SUCCESS"
     PARTIAL_SUCCESS = "WITHDRAW_SUCCESS_PARTIAL"
     FAILURE = "WITHDRAW_FAILED"
+    NOT_ATTEMPTED = "WITHDRAW_NOT_ATTEMPTED"
 
 
 class TransactionManager:
@@ -21,95 +25,90 @@ class TransactionManager:
         self.balances_df = balances_df
         self.withdrawals_df = withdrawals_df
     
-    def group_and_sort(self) -> DataFrame:
+    def group_and_sort(self) -> None:
         """
         Grouping and sorting of the dataframes
-
-        Returns:
-            sorted_balance_df (DataFrame): sorted df of the balances with total balance and total withdrawal amount
         """
-        # Calculate total balance for each account
-        total_balance_df = self.balances_df.groupBy("account_id") \
-                                    .agg(spark_sum("available_balance").alias("total_balance"))
 
-        # Calculate total withdrawal amount for each account
-        total_withdrawal_df = self.withdrawals_df.groupBy("account_id").agg(spark_sum("withdraw_amount").alias("total_withdrawal"))
+        # Add total_balance column for each account_id based on available_balance
+        window = Window.partitionBy("account_id")
+        self.balances_df = self.balances_df.withColumn("total_balance", spark_sum("available_balance").over(window))
+        
+        # Add initial_balance column as available_balance
+        self.balances_df = self.balances_df.withColumn("initial_balance", col("available_balance"))
+        
+        # Sort balances DataFrame based on account_id*balance_order
+        self.balances_df = self.balances_df.orderBy(col("account_id"), col("balance_order"))
+        
+        # Sort withdrawals DataFrame based on account_id*withdraw_order
+        self.withdrawals_df = self.withdrawals_df.orderBy(col("account_id"), col("withdraw_order"))
 
-        # Join total balance and total withdrawal
-        result_df = self.balances_df.join(total_withdrawal_df, "account_id", "inner") \
-                                    .withColumn("initial_balance", col("available_balance")) \
-                                    .withColumn("total_withdrawal", col("total_withdrawal")) 
+        # Cast columns to appropriate types
+        self.balances_df = self.balances_df.withColumn("available_balance", self.balances_df["available_balance"].cast("float")) \
+                                        .withColumn("balance_order", self.balances_df["balance_order"].cast("int")) \
+                                        .withColumn("validation_result", lit(WithdrawValidationResult.NOT_ATTEMPTED.value))
+        self.withdrawals_df = self.withdrawals_df.withColumn("withdraw_amount", self.withdrawals_df["withdraw_amount"].cast("float")) \
+                                                .withColumn("withdraw_order", self.withdrawals_df["withdraw_order"].cast("int"))
 
-        result_df = result_df.join(total_balance_df, "account_id", "inner") \
-                                .withColumn("total_balance", col("total_balance")) 
-
-        # Sort balances by account_id and balance_order in ascending order
-        sorted_balance_df = result_df.orderBy("account_id", "balance_order")
-
-        return sorted_balance_df
-
-    def apply_withdrawal_rules(self, sorted_balance_df: DataFrame) -> list:
+        
+    def apply_withdrawal_rules(self) -> None:
         """
         Apply withdrawal rules on sorted dataframe
-
-        Args:
-            sorted_balance_df (DataFrame): sorted df of the balances with total balance and total withdrawal amount
-
-        Returns:
-            results (list): resultant list of the withdrawal status of each balance at order level
         """
-        results = []
-
-        account_id = sorted_balance_df.first().account_id
-        remaining_withdrawal = sorted_balance_df.first().total_withdrawal
-
-        # Iterate over balances to deduct withdrawal amount
-        for row in sorted_balance_df.collect():
-            if remaining_withdrawal == 0 and account_id != row["account_id"]:
-                remaining_withdrawal = row["total_withdrawal"]
+        # Deduction from balances
+        for row in self.withdrawals_df.collect():
+            account_id = row["account_id"]
+            withdraw_amount = row["withdraw_amount"]
             
-            if float(row["total_balance"]) < float(row["total_withdrawal"]):
-                available_balance = float(row["available_balance"])
-                status = BalanceStatus.ACTIVE.name
-                validation_result = WithdrawValidationResult.FAILURE.name
-                remaining_withdrawal = 0
-            else:
-                if float(row["available_balance"]) >= remaining_withdrawal:
-                    available_balance = float(row["available_balance"]) - remaining_withdrawal
-                    status = BalanceStatus.BALANCE_WITHDREW.name if float(row["available_balance"]) == remaining_withdrawal else BalanceStatus.ACTIVE.name
-                    remaining_withdrawal = 0
-                    validation_result = WithdrawValidationResult.SUCCESS.name
+            # Filter balances for the current account_id
+            account_balances = self.balances_df.filter(col("account_id") == account_id).collect()
+            
+            total_balance = sum(balance["available_balance"] for balance in account_balances)
+            
+            for balance in account_balances:
+                if withdraw_amount == 0:
+                    continue
+
+                if withdraw_amount > total_balance:
+                    new_balance = balance["available_balance"]
+                    validation_result = WithdrawValidationResult.FAILURE.value
+                    status = BalanceStatus.ACTIVE.value
                 else:
-                    available_balance = 0
-                    remaining_withdrawal = remaining_withdrawal - float(row["available_balance"])
-                    status = BalanceStatus.BALANCE_WITHDREW.name
-                    validation_result = WithdrawValidationResult.PARTIAL_SUCCESS.name
-            
-            results.append((
-                row["account_id"],
-                int(row["balance_order"]),
-                float(row["initial_balance"]),
-                float(available_balance),
-                status,
-                validation_result
-            ))
-        
-        return results
+                    if balance["available_balance"] >= withdraw_amount:
+                        new_balance = balance["available_balance"] - withdraw_amount
+                        status = BalanceStatus.BALANCE_WITHDREW.value if new_balance == 0 else BalanceStatus.ACTIVE.value
+                        withdraw_amount = 0
+                        validation_result = WithdrawValidationResult.SUCCESS.value
+                    else:
+                        new_balance = 0
+                        withdraw_amount -= balance["available_balance"]
+                        validation_result = WithdrawValidationResult.PARTIAL_SUCCESS.value
+                        status = BalanceStatus.BALANCE_WITHDREW.value
+                
+                # Update balances row with appropriate values
+                self.balances_df = self.balances_df.withColumn("available_balance", 
+                                               when((col("account_id") == account_id) & (col("balance_order") == balance["balance_order"]), new_balance)
+                                               .otherwise(col("available_balance")))
+                self.balances_df = self.balances_df.withColumn("status", 
+                                               when((col("account_id") == account_id) & (col("balance_order") == balance["balance_order"]), status)
+                                               .otherwise(col("status")))
+                self.balances_df = self.balances_df.withColumn("validation_result", 
+                                               when((col("account_id") == account_id) & (col("balance_order") == balance["balance_order"]), validation_result)
+                                               .otherwise(col("validation_result")))
+                
 
     def process_withdrawals(self) -> None:
         """
         Process withdrawals on balances
         """
         # grouping and sorting
-        sorted_balance_df = self.group_and_sort()
+        self.group_and_sort()
         logger.info("grouping and sorting done..")
 
         # apply rules
-        withdraw_results = self.apply_withdrawal_rules(sorted_balance_df=sorted_balance_df)
+        self.apply_withdrawal_rules()
         logger.info("Rules applied..")
 
         # Write result DataFrame to CSV
-        result_df = self.spark.createDataFrame(withdraw_results, ["account_id", "balance_order", "initial_balance", "available_balance", "status", "validation_result"])
-        result_df.repartition(1).write.csv("data/result.csv", mode="overwrite", header=True)
-        
+        self.balances_df.repartition(1).write.csv("data/result.csv", mode="overwrite", header=True)
 
